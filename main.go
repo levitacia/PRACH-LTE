@@ -5,25 +5,17 @@ import (
 	"math"
 	"math/cmplx"
 	"math/rand"
-	"sync"
-	"time"
 )
 
 const (
 	numUEs       = 100 // мобилки
 	numPreambles = 64  // в 1 prach сетке
 	maxRetries   = 5   // попыток при коллизиях
-	//Preamble sequence
-	Nzc = 839
-	u   = 1
-	// ----
 )
 
 var (
 	preambles    [numPreambles]Preamble
 	connectedUEs []int
-	mux          sync.Mutex
-	randSource   = rand.New(rand.NewSource(time.Now().UnixNano()))
 )
 
 type Preamble struct {
@@ -71,17 +63,13 @@ func ResetPreambles() {
 
 // ChoosePreamble выбирает случайную преамбулу для UE
 func (ue *UE) ChoosePreamble() {
-	ue.PreambleID = randSource.Intn(numPreambles)
-	mux.Lock()
+	ue.PreambleID = rand.Intn(numPreambles)
 	preambles[ue.PreambleID].UsedByUEs = append(preambles[ue.PreambleID].UsedByUEs, ue.ID)
-	mux.Unlock()
 }
 
 // TransmitPreamble имитирует передачу преамбулы и получение ответа от eNodeB
 func (ue *UE) TransmitPreamble() RandomAccessResponse {
-	mux.Lock()
 	users := preambles[ue.PreambleID].UsedByUEs
-	mux.Unlock()
 
 	if len(users) > 1 {
 		// Коллизия
@@ -90,7 +78,7 @@ func (ue *UE) TransmitPreamble() RandomAccessResponse {
 
 	// Успешный ответ
 	return RandomAccessResponse{
-		TimingAdvance: randSource.Intn(100),
+		TimingAdvance: rand.Intn(100),
 		TempCRNTI:     ue.ID,
 		Success:       true,
 	}
@@ -108,9 +96,7 @@ func (ue *UE) PerformRandomAccessForSubframe() bool {
 	if response.Success {
 		ue.TempCRNTI = response.TempCRNTI
 		ue.IsConnected = true
-		mux.Lock()
 		connectedUEs = append(connectedUEs, ue.ID)
-		mux.Unlock()
 		fmt.Printf("UE %d успешно подключено с временным C-RNTI %d\n", ue.ID, ue.TempCRNTI)
 		return true
 	}
