@@ -2,32 +2,27 @@ package main
 
 import (
 	"fmt"
-	"math"
-	"math/cmplx"
 	"math/rand"
 )
 
 const (
-	numUEs       = 100 // мобилки
-	numPreambles = 64  // в 1 prach сетке
-	maxRetries   = 5   // попыток при коллизиях
+	initialUEs        = 100 // Стартовое количество абонентов
+	numPreambles      = 64  // Число преамбул в PRACH
+	maxRetries        = 5   // Максимальное количество попыток
+	maxSubframes      = 100 // Общее количество сабфреймов для моделирования
+	maxNewUEsPerFrame = 70  // Максимальное число новых абонентов за сабфрейм
 )
 
 var (
 	preambles    [numPreambles]Preamble
 	connectedUEs []int
+	excludedUEs  []int // Список устройств, исключённых из системы
+	totalUEs     = 0   // Общее количество устройств в системе
 )
 
 type Preamble struct {
 	ID        int
 	UsedByUEs []int
-	sequence  []complex128
-}
-
-type RandomAccessResponse struct {
-	TimingAdvance int
-	TempCRNTI     int
-	Success       bool
 }
 
 type UE struct {
@@ -36,94 +31,137 @@ type UE struct {
 	PreambleID  int
 	TempCRNTI   int
 	IsConnected bool
+	Excluded    bool
 }
 
-func generateZadoffChuSequence(length, u int) []complex128 {
-	sequence := make([]complex128, length)
-	for n := 0; n < length; n++ {
-		exponent := -math.Pi * float64(u*n*(n+1)) / float64(length)
-		sequence[n] = cmplx.Exp(complex(0, exponent))
-	}
-	return sequence
-}
-
-// InitializePreambles инициализирует доступные преамбулы
 func InitializePreambles() {
 	for i := 0; i < numPreambles; i++ {
 		preambles[i] = Preamble{ID: i, UsedByUEs: []int{}}
 	}
 }
 
-// ResetPreambles освобождает преамбулы для нового subframe
 func ResetPreambles() {
 	for i := 0; i < numPreambles; i++ {
 		preambles[i].UsedByUEs = []int{}
 	}
 }
 
-// ChoosePreamble выбирает случайную преамбулу для UE
 func (ue *UE) ChoosePreamble() {
 	ue.PreambleID = rand.Intn(numPreambles)
 	preambles[ue.PreambleID].UsedByUEs = append(preambles[ue.PreambleID].UsedByUEs, ue.ID)
 }
 
-// TransmitPreamble имитирует передачу преамбулы и получение ответа от eNodeB
-func (ue *UE) TransmitPreamble() RandomAccessResponse {
-	users := preambles[ue.PreambleID].UsedByUEs
+func ProcessSubframe(ues *[]UE) (int, int, int) {
+	collisions := 0
+	successfulConnections := 0
+	exclusions := 0
 
-	if len(users) > 1 {
-		// Коллизия
-		return RandomAccessResponse{Success: false}
+	for i := range *ues {
+		// Обрабатываем только устройства, которые еще не подключены и не исключены
+		if !(*ues)[i].IsConnected && !(*ues)[i].Excluded {
+			(*ues)[i].ChoosePreamble()
+		}
 	}
 
-	// Успешный ответ
-	return RandomAccessResponse{
-		TimingAdvance: rand.Intn(100),
-		TempCRNTI:     ue.ID,
-		Success:       true,
+	// Проверка на коллизии
+	for i := 0; i < numPreambles; i++ {
+		if len(preambles[i].UsedByUEs) == 1 {
+			// Успешное подключение
+			ueID := preambles[i].UsedByUEs[0]
+			for j := range *ues {
+				if (*ues)[j].ID == ueID {
+					(*ues)[j].IsConnected = true
+					(*ues)[j].TempCRNTI = ueID // Временный C-RNTI
+					connectedUEs = append(connectedUEs, ueID)
+					successfulConnections++
+					break
+				}
+			}
+		} else if len(preambles[i].UsedByUEs) > 1 {
+			// Коллизия
+			collisions++
+			for _, ueID := range preambles[i].UsedByUEs {
+				for j := range *ues {
+					if (*ues)[j].ID == ueID {
+						(*ues)[j].Attempts++
+						if (*ues)[j].Attempts > maxRetries {
+							(*ues)[j].Excluded = true
+							excludedUEs = append(excludedUEs, ueID)
+							exclusions++
+						}
+					}
+				}
+			}
+		}
 	}
+
+	return successfulConnections, collisions, exclusions
 }
 
-// PerformRandomAccessForSubframe реализует процесс случайного доступа для одного subframe
-func (ue *UE) PerformRandomAccessForSubframe() bool {
-	if ue.IsConnected {
-		return true
+func AddNewUEs(ues *[]UE, numNewUEs int) {
+	startID := totalUEs
+	for i := 0; i < numNewUEs; i++ {
+		newUE := UE{ID: startID + i}
+		*ues = append(*ues, newUE)
 	}
-
-	ue.ChoosePreamble()
-	response := ue.TransmitPreamble()
-
-	if response.Success {
-		ue.TempCRNTI = response.TempCRNTI
-		ue.IsConnected = true
-		connectedUEs = append(connectedUEs, ue.ID)
-		fmt.Printf("UE %d успешно подключено с временным C-RNTI %d\n", ue.ID, ue.TempCRNTI)
-		return true
-	}
-
-	ue.Attempts++
-	return false
+	totalUEs += numNewUEs
 }
 
 func main() {
 	var ues []UE
-	for i := 0; i < numUEs; i++ {
+	totalUEs = initialUEs
+
+	// Добавляем начальные устройства
+	for i := 0; i < initialUEs; i++ {
 		ues = append(ues, UE{ID: i})
 	}
 
 	subframe := 0
-	for len(connectedUEs) < numUEs {
+	for subframe < maxSubframes {
 		subframe++
-		fmt.Printf("--- Subframe %d ---\n", subframe)
+		fmt.Printf("\n--- Subframe %d ---\n", subframe)
 		InitializePreambles()
 
-		for i := range ues {
-			if !ues[i].IsConnected {
-				ues[i].PerformRandomAccessForSubframe()
+		// Добавляем случайное количество новых абонентов
+		newUEs := rand.Intn(maxNewUEsPerFrame + 1)
+		if newUEs > 0 {
+			AddNewUEs(&ues, newUEs)
+			fmt.Printf("Добавлено %d новых абонентов, всего устройств: %d\n", newUEs, totalUEs)
+		}
+
+		// Подсчитываем количество устройств, которые пытаются подключиться
+		activeUEs := 0
+		for _, ue := range ues {
+			if !ue.IsConnected && !ue.Excluded {
+				activeUEs++
 			}
 		}
+
+		fmt.Printf("Устройств, пытающихся подключиться: %d\n", activeUEs)
+
+		if activeUEs > 0 {
+			// Обрабатываем текущий сабфрейм
+			successfulConnections, collisions, exclusions := ProcessSubframe(&ues)
+
+			// Выводим подробную информацию о сабфрейме
+			fmt.Printf("Успешные подключения: %d\n", successfulConnections)
+			fmt.Printf("Коллизии: %d\n", collisions)
+			fmt.Printf("Исключенные устройства за этот сабфрейм: %d\n", exclusions)
+		} else {
+			fmt.Println("Нет активных устройств для обработки, ожидание новых устройств...")
+		}
+
 		ResetPreambles()
 	}
 
-	fmt.Printf("Итог: %d устройств подключены из %d за %d subframe\n", len(connectedUEs), numUEs, subframe)
+	// Итоги моделирования
+	fmt.Printf("\nИтог: %d устройств подключено, %d исключено, всего %d сабфреймов\n",
+		len(connectedUEs), len(excludedUEs), subframe)
+
+	if len(excludedUEs) > 0 {
+		fmt.Println("Устройства, которые не удалось подключить совсем:")
+		for _, ueID := range excludedUEs {
+			fmt.Printf("UE %d\n", ueID)
+		}
+	}
 }
